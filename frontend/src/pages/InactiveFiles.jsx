@@ -5,8 +5,9 @@ import { formatBytes } from '../utils/formatters';
 
 const INACTIVE_THRESHOLD_DAYS = 180;
 
-export default function InactiveFiles({ scanResult, setScanResult }) {
+export default function InactiveFiles({ folderPath, scanResult, setScanResult }) {
   const [selectedFiles, setSelectedFiles] = useState(new Set());
+  const [isProcessing, setIsProcessing] = useState(false);
 
   // Filter files that are older than 180 days
   const inactiveFiles = useMemo(() => {
@@ -18,7 +19,7 @@ export default function InactiveFiles({ scanResult, setScanResult }) {
     return scanResult.files.filter(file => {
       const fileDate = new Date(file.modified_time || file.created_time).getTime();
       return (now - fileDate) > thresholdMs;
-    }).sort((a, b) => new Date(a.modified_time).getTime() - new Date(b.modified_time).getTime()); // Oldest first
+    }).sort((a, b) => new Date(a.modified_time).getTime() - new Date(b.modified_time).getTime());
   }, [scanResult]);
 
   const totalReclaimable = useMemo(() => {
@@ -33,37 +34,99 @@ export default function InactiveFiles({ scanResult, setScanResult }) {
   };
 
   const toggleAll = () => {
-    if (selectedFiles.size === inactiveFiles.length) {
-      setSelectedFiles(new Set());
-    } else {
-      setSelectedFiles(new Set(inactiveFiles.map(f => f.file_path)));
-    }
+    if (selectedFiles.size === inactiveFiles.length) setSelectedFiles(new Set());
+    else setSelectedFiles(new Set(inactiveFiles.map(f => f.file_path)));
   };
 
-  // Placeholder for Delete Action (Updates UI state)
-  const handleDeleteSelected = () => {
-    if (!scanResult) return;
-    
-    const confirmDelete = window.confirm(`Are you sure you want to delete ${selectedFiles.size} files?`);
-    if (!confirmDelete) return;
-
-    // In a real app, you would call your backend DELETE API here.
-    // For now, we update the React state to remove them from the UI.
+  // Helper to remove files from React state after physical deletion
+  const removeFilesFromState = (deletedPaths) => {
     setScanResult(prev => {
       const newData = { ...prev };
-      newData.files = newData.files.filter(f => !selectedFiles.has(f.file_path));
+      newData.files = newData.files.filter(f => !deletedPaths.includes(f.file_path));
       
       const newClusters = { ...newData.clusters };
       Object.keys(newClusters).forEach(clusterId => {
-        newClusters[clusterId].files = newClusters[clusterId].files.filter(f => !selectedFiles.has(f.file_path));
+        newClusters[clusterId].files = newClusters[clusterId].files.filter(f => !deletedPaths.includes(f.file_path));
         if (newClusters[clusterId].files.length === 0) delete newClusters[clusterId];
       });
       
       newData.clusters = newClusters;
       return newData;
     });
-    
+
     setSelectedFiles(new Set());
+  };
+
+  // --------------------------------------------------------
+  // API: DELETE FILES
+  // --------------------------------------------------------
+  const handleDeleteSelected = async () => {
+    if (!window.confirm(`Are you sure you want to permanently delete ${selectedFiles.size} files? This cannot be undone.`)) return;
+    
+    setIsProcessing(true);
+    try {
+      const response = await fetch('http://localhost:5000/api/files/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_paths: Array.from(selectedFiles) })
+      });
+      
+      const data = await response.json();
+      if (data.success) {
+        removeFilesFromState(data.deleted);
+        alert(`Successfully deleted ${data.deleted.length} files.`);
+      } else {
+        throw new Error(data.error);
+      }
+    } catch (error) {
+      alert(`Error deleting files: ${error.message}`);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // --------------------------------------------------------
+  // API: ARCHIVE TO ZIP
+  // --------------------------------------------------------
+  const handleArchiveSelected = async () => {
+    setIsProcessing(true);
+    try {
+      const response = await fetch('http://localhost:5000/api/files/archive', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          file_paths: Array.from(selectedFiles),
+          folder_path: folderPath // Saves the ZIP in the root of the scanned folder
+        })
+      });
+      
+      const data = await response.json();
+      if (data.success) {
+        // Ask user if they want to delete the originals now that they are zipped
+        const deleteOriginals = window.confirm(
+          `Successfully created archive:\n${data.archive_path}\n\nDo you want to permanently delete the original files to free up space?`
+        );
+        
+        if (deleteOriginals) {
+          const delResponse = await fetch('http://localhost:5000/api/files/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_paths: data.archived })
+          });
+          const delData = await delResponse.json();
+          if (delData.success) removeFilesFromState(delData.deleted);
+        } else {
+          // Just deselect if they chose to keep originals
+          setSelectedFiles(new Set());
+        }
+      } else {
+        throw new Error(data.error);
+      }
+    } catch (error) {
+      alert(`Error archiving files: ${error.message}`);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   if (!scanResult) {
@@ -112,17 +175,18 @@ export default function InactiveFiles({ scanResult, setScanResult }) {
 
           <div className="flex gap-3">
             <button 
-              disabled={selectedFiles.size === 0}
+              onClick={handleArchiveSelected}
+              disabled={selectedFiles.size === 0 || isProcessing}
               className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors font-medium"
             >
-              <Archive className="w-4 h-4" /> Archive to ZIP
+              <Archive className="w-4 h-4" /> {isProcessing ? 'Processing...' : 'Archive to ZIP'}
             </button>
             <button 
               onClick={handleDeleteSelected}
-              disabled={selectedFiles.size === 0}
+              disabled={selectedFiles.size === 0 || isProcessing}
               className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors font-medium"
             >
-              <Trash2 className="w-4 h-4" /> Delete Selected
+              <Trash2 className="w-4 h-4" /> {isProcessing ? 'Processing...' : 'Delete Selected'}
             </button>
           </div>
         </div>

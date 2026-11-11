@@ -7,6 +7,7 @@ from app.services.scanner import scan_directory
 from app.services.ai_engine import cluster_files
 from app.services.organization import consolidate_clusters, organize_files
 from app.services.duplicates import find_duplicates, resolve_duplicates
+from app.services.file_actions import delete_files, archive_files
 
 from app.services.vector_db_service import semantic_search
 from app.services.ai_engine import generate_text_embeddings, generate_clip_text_embedding
@@ -191,6 +192,31 @@ def preview_file():
     if os.path.exists(path):
         return send_file(path)
     return "Not found", 404
+
+@app.post("/api/files/delete")
+def api_delete_files():
+    try:
+        data = request.get_json(silent=True)
+        file_paths = data.get("file_paths", [])
+        result = delete_files(file_paths)
+        return jsonify({"success": True, **result}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.post("/api/files/archive")
+def api_archive_files():
+    try:
+        data = request.get_json(silent=True)
+        file_paths = data.get("file_paths", [])
+        folder_path = data.get("folder_path") # Where to save the ZIP
+        
+        if not folder_path:
+            return jsonify({"error": "Target folder path is required."}), 400
+            
+        result = archive_files(file_paths, folder_path)
+        return jsonify({"success": True, **result}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
